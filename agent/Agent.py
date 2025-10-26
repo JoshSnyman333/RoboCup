@@ -1,0 +1,446 @@
+from agent.Base_Agent import Base_Agent
+from math_ops.Math_Ops import Math_Ops as M
+import math
+import numpy as np
+
+from strategy.Assignment import role_assignment 
+from strategy.Strategy import Strategy 
+
+from formation.Formation import GenerateBasicFormation
+
+
+class Agent(Base_Agent):
+    def __init__(self, host:str, agent_port:int, monitor_port:int, unum:int,
+                 team_name:str, enable_log, enable_draw, wait_for_server=True, is_fat_proxy=False) -> None:
+        
+        # define robot type
+        robot_type = (0,1,1,1,2,3,3,3,4,4,4)[unum-1]
+
+        # Initialize base agent
+        # Args: Server IP, Agent Port, Monitor Port, Uniform No., Robot Type, Team Name, Enable Log, Enable Draw, play mode correction, Wait for Server, Hear Callback
+        super().__init__(host, agent_port, monitor_port, unum, robot_type, team_name, enable_log, enable_draw, True, wait_for_server, None)
+
+        self.enable_draw = enable_draw
+        self.state = 0  # 0-Normal, 1-Getting up, 2-Kicking
+        self.kick_direction = 0
+        self.kick_distance = 0
+        self.fat_proxy_cmd = "" if is_fat_proxy else None
+        self.fat_proxy_walk = np.zeros(3) # filtered walk parameters for fat proxy
+
+        self.init_pos = ([-14,0],[-9,-5],[-9,0],[-9,5],[-5,-5],[-5,0],[-5,5],[-1,-6],[-1,-2.5],[-1,2.5],[-1,6])[unum-1] # initial formation
+
+        # Kickoff state: prevent double-touch by the kicker for a brief window
+        self.kickoff_kicker_unum = None
+        self.kickoff_no_touch_deadline = 0  # world.time_local_ms timestamp
+
+
+    def beam(self, avoid_center_circle=False):
+        r = self.world.robot
+        pos = self.init_pos[:] # copy position list 
+        self.state = 0
+
+        # Avoid center circle by moving the player back 
+        if avoid_center_circle and np.linalg.norm(self.init_pos) < 2.5:
+            pos[0] = -2.3 
+
+        if np.linalg.norm(pos - r.loc_head_position[:2]) > 0.1 or self.behavior.is_ready("Get_Up"):
+            self.scom.commit_beam(pos, M.vector_angle((-pos[0],-pos[1]))) # beam to initial position, face coordinate (0,0)
+        else:
+            if self.fat_proxy_cmd is None: # normal behavior
+                self.behavior.execute("Zero_Bent_Knees_Auto_Head")
+            else: # fat proxy behavior
+                self.fat_proxy_cmd += "(proxy dash 0 0 0)"
+                self.fat_proxy_walk = np.zeros(3) # reset fat proxy walk
+
+
+    def move(self, target_2d=(0,0), orientation=None, is_orientation_absolute=True,
+             avoid_obstacles=True, priority_unums=[], is_aggressive=False, timeout=3000):
+        '''
+        Walk to target position
+
+        Parameters
+        ----------
+        target_2d : array_like
+            2D target in absolute coordinates
+        orientation : float
+            absolute or relative orientation of torso, in degrees
+            set to None to go towards the target (is_orientation_absolute is ignored)
+        is_orientation_absolute : bool
+            True if orientation is relative to the field, False if relative to the robot's torso
+        avoid_obstacles : bool
+            True to avoid obstacles using path planning (maybe reduce timeout arg if this function is called multiple times per simulation cycle)
+        priority_unums : list
+            list of teammates to avoid (since their role is more important)
+        is_aggressive : bool
+            if True, safety margins are reduced for opponents
+        timeout : float
+            restrict path planning to a maximum duration (in microseconds)    
+        '''
+        r = self.world.robot
+
+        if self.fat_proxy_cmd is not None: # fat proxy behavior
+            self.fat_proxy_move(target_2d, orientation, is_orientation_absolute) # ignore obstacles
+            return
+
+        if avoid_obstacles:
+            target_2d, _, distance_to_final_target = self.path_manager.get_path_to_target(
+                target_2d, priority_unums=priority_unums, is_aggressive=is_aggressive, timeout=timeout)
+        else:
+            distance_to_final_target = np.linalg.norm(target_2d - r.loc_head_position[:2])
+
+        self.behavior.execute("Walk", target_2d, True, orientation, is_orientation_absolute, distance_to_final_target) # Args: target, is_target_abs, ori, is_ori_abs, distance
+
+
+
+
+
+    def kick(self, kick_direction=None, kick_distance=None, abort=False, enable_pass_command=False):
+        '''
+        Walk to ball and kick
+
+        Parameters
+        ----------
+        kick_direction : float
+            kick direction, in degrees, relative to the field
+        kick_distance : float
+            kick distance in meters
+        abort : bool
+            True to abort.
+            The method returns True upon successful abortion, which is immediate while the robot is aligning itself. 
+            However, if the abortion is requested during the kick, it is delayed until the kick is completed.
+        avoid_pass_command : bool
+            When False, the pass command will be used when at least one opponent is near the ball
+            
+        Returns
+        -------
+        finished : bool
+            Returns True if the behavior finished or was successfully aborted.
+        '''
+        return self.behavior.execute("Dribble",None,None)
+
+        if self.min_opponent_ball_dist < 1.45 and enable_pass_command:
+            self.scom.commit_pass_command()
+
+        self.kick_direction = self.kick_direction if kick_direction is None else kick_direction
+        self.kick_distance = self.kick_distance if kick_distance is None else kick_distance
+
+        if self.fat_proxy_cmd is None: # normal behavior
+            return self.behavior.execute("Basic_Kick", self.kick_direction, abort) # Basic_Kick has no kick distance control
+        else: # fat proxy behavior
+            return self.fat_proxy_kick()
+
+
+    def kickTarget(self, strategyData, mypos_2d=(0,0),target_2d=(0,0), abort=False, enable_pass_command=False):
+        '''
+        Walk to ball and kick
+
+        Parameters
+        ----------
+        kick_direction : float
+            kick direction, in degrees, relative to the field
+        kick_distance : float
+            kick distance in meters
+        abort : bool
+            True to abort.
+            The method returns True upon successful abortion, which is immediate while the robot is aligning itself. 
+            However, if the abortion is requested during the kick, it is delayed until the kick is completed.
+        avoid_pass_command : bool
+            When False, the pass command will be used when at least one opponent is near the ball
+            
+        Returns
+        -------
+        finished : bool
+            Returns True if the behavior finished or was successfully aborted.
+        '''
+
+        # Calculate the vector from the current position to the target position
+        vector_to_target = np.array(target_2d) - np.array(mypos_2d)
+        
+        # Calculate the distance (magnitude of the vector)
+        kick_distance = np.linalg.norm(vector_to_target)
+        
+        # Calculate the direction (angle) in radians
+        direction_radians = np.arctan2(vector_to_target[1], vector_to_target[0])
+        
+        # Convert direction to degrees for easier interpretation (optional)
+        kick_direction = np.degrees(direction_radians)
+
+
+        if strategyData.min_opponent_ball_dist < 1.45 and enable_pass_command:
+            self.scom.commit_pass_command()
+
+        self.kick_direction = self.kick_direction if kick_direction is None else kick_direction
+        self.kick_distance = self.kick_distance if kick_distance is None else kick_distance
+
+        if self.fat_proxy_cmd is None: # normal behavior
+            return self.behavior.execute("Basic_Kick", self.kick_direction, abort) # Basic_Kick has no kick distance control
+        else: # fat proxy behavior
+            return self.fat_proxy_kick()
+
+    def think_and_send(self):
+        
+        behavior = self.behavior
+        strategyData = Strategy(self.world)
+        d = self.world.draw
+
+        if strategyData.play_mode == self.world.M_GAME_OVER:
+            pass
+        elif strategyData.PM_GROUP == self.world.MG_ACTIVE_BEAM:
+            self.beam()
+        elif strategyData.PM_GROUP == self.world.MG_PASSIVE_BEAM:
+            self.beam(True) # avoid center circle
+        elif self.state == 1 or (behavior.is_ready("Get_Up") and self.fat_proxy_cmd is None):
+            self.state = 0 if behavior.execute("Get_Up") else 1
+        else:
+            if strategyData.play_mode != self.world.M_BEFORE_KICKOFF:
+                self.select_skill(strategyData)
+            else:
+                pass
+
+
+        #--------------------------------------- 3. Broadcast
+        self.radio.broadcast()
+
+        #--------------------------------------- 4. Send to server
+        if self.fat_proxy_cmd is None: # normal behavior
+            self.scom.commit_and_send( strategyData.robot_model.get_command() )
+        else: # fat proxy behavior
+            self.scom.commit_and_send( self.fat_proxy_cmd.encode() ) 
+            self.fat_proxy_cmd = ""
+
+
+
+        
+
+
+
+    def select_skill(self,strategyData):
+        #--------------------------------------- 2. Decide action
+        drawer = self.world.draw
+        path_draw_options = self.path_manager.draw_options
+
+        #------------------------------------------------------
+        # PlayOn: Closest agent runs to ball, others spread out. Once it has the ball it runs with it to the opponent's goal and passes when opponent gets close.
+        if strategyData.play_mode == self.world.M_PLAY_ON:
+            return self._play_on_strategy(strategyData)
+
+        #------------------------------------------------------
+        # Their kickoff: barrier around center while ball is at origin; else switch to PlayOn behavior
+        if strategyData.play_mode == self.world.M_THEIR_KICKOFF:
+            ball_2d = self.world.ball_abs_pos[:2]
+            center = np.array((0.0, 0.0))
+            if np.linalg.norm(ball_2d - center) < 0.2:  # ball still on kickoff spot
+                drawer.annotation((0,10.5), "Their Kickoff: Huddle", drawer.Color.yellow, "status")
+
+                # Barrier circle parameters
+                radius = 2.7
+                n = max(1, len(strategyData.teammate_positions))
+
+                # Arc on our half (x <= 0), centered at 180°, span up to 120°
+                max_span_deg = 120.0
+                span_deg = min(max_span_deg, max(0.0, 20.0 * (n - 1)))
+                start_deg = 180.0 + span_deg / 2.0
+                end_deg = 180.0 - span_deg / 2.0
+                angles_deg = np.linspace(start_deg, end_deg, n)
+
+                arc_points = []
+                for ang in angles_deg:
+                    a = np.deg2rad(ang)
+                    p = center + radius * np.array((np.cos(a), np.sin(a)))
+                    if p[0] > -0.1:  # ensure on our half
+                        p[0] = -0.1
+                    arc_points.append(tuple(p))
+
+                my_idx = min(max(0, strategyData.player_unum - 1), n - 1)
+                my_target = arc_points[my_idx]
+
+                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(center)
+                drawer.line(strategyData.mypos, my_target, 2, drawer.Color.blue, "kickoff huddle")
+                return self.move(my_target, orientation=desired_ori)
+            else:
+                # Ball has been kicked: behave like PlayOn
+                return self._play_on_strategy(strategyData)
+
+        #------------------------------------------------------
+        # Our kickoff: assign closest player as kicker; others hold formation. Kicker does a direct long kick to right field.
+        if strategyData.play_mode == self.world.M_OUR_KICKOFF:
+            goal_right = (15, 0)
+            r = self.world.robot
+            mypos_2d = r.loc_head_position[:2]
+
+            kicker_unum = strategyData.active_player_unum  # closest to the ball at kickoff
+            if strategyData.robot_model.unum == kicker_unum:
+                # Visualize intent
+                drawer.annotation((0,10.5), "Our Kickoff: Kicker", drawer.Color.yellow, "status")
+                drawer.line(tuple(mypos_2d), goal_right, 2, drawer.Color.red, "kickoff kick")
+                # Directly use Basic_Kick via kickTarget (no dribble)
+                # Set double-touch prevention window (e.g., 3 seconds)
+                self.kickoff_kicker_unum = kicker_unum
+                self.kickoff_no_touch_deadline = self.world.time_local_ms + 3000
+                return self.kickTarget(strategyData, tuple(mypos_2d), goal_right)
+            else:
+                # Hold a simple formation while waiting for the kick
+                drawer.annotation((0,10.5), "Our Kickoff: Formation", drawer.Color.cyan, "status")
+                formation_positions = GenerateBasicFormation()
+                point_preferences = role_assignment(strategyData.teammate_positions, formation_positions)
+                strategyData.my_desired_position = point_preferences[strategyData.player_unum]
+                strategyData.my_desired_orientation = strategyData.GetDirectionRelativeToMyPositionAndTarget(
+                    strategyData.my_desired_position)
+                drawer.line(strategyData.mypos, strategyData.my_desired_position, 2, drawer.Color.blue, "kickoff setup")
+                return self.move(strategyData.my_desired_position, orientation=strategyData.my_desired_orientation)
+
+        #------------------------------------------------------
+        # Default: no predefined behavior -> behave like PlayOn
+        return self._play_on_strategy(strategyData)
+
+    def _play_on_strategy(self, strategyData):
+        drawer = self.world.draw
+        goal = (15, 0)  # opponent's goal
+        r = self.world.robot
+        ball_2d = self.world.ball_abs_pos[:2]
+        mypos_2d = r.loc_head_position[:2]
+
+        # Define possession and pressure thresholds
+        has_ball = np.linalg.norm(ball_2d - mypos_2d) < 0.28
+        opponent_close = (getattr(strategyData, "min_opponent_ball_dist", None) is not None 
+                          and strategyData.min_opponent_ball_dist < 1.2)
+
+        # Decide active player: the closest to the ball, with optional kickoff double-touch override
+        effective_active_unum = strategyData.active_player_unum
+        now = self.world.time_local_ms
+        if (self.kickoff_kicker_unum is not None and now < self.kickoff_no_touch_deadline
+            and effective_active_unum == self.kickoff_kicker_unum):
+            # Choose nearest non-kicker as temporary active player
+            non_kicker_indices = [i for i in range(len(strategyData.teammate_positions)) if (i+1) != self.kickoff_kicker_unum]
+            # filter out teammates with unknown positions
+            valid_indices = [i for i in non_kicker_indices if (strategyData.teammate_positions[i] is not None and len(strategyData.teammate_positions[i]) >= 2)]
+            if valid_indices:
+                dists = [np.linalg.norm(np.array(strategyData.teammate_positions[i][:2]) - ball_2d) for i in valid_indices]
+                min_idx = valid_indices[int(np.argmin(dists))]
+                effective_active_unum = min_idx + 1
+            else:
+                # Hard fallback: pick the lowest-numbered teammate that isn't the kicker
+                candidate_unums = [i+1 for i in non_kicker_indices]
+                if candidate_unums:
+                    effective_active_unum = candidate_unums[0]
+
+        # If a non-kicker already has possession, clear the restriction early
+        if self.kickoff_kicker_unum is not None and now < self.kickoff_no_touch_deadline:
+            # Estimate possession by checking nearest teammate to ball is not the kicker and is close
+            all_indices = [i for i in range(len(strategyData.teammate_positions)) if (strategyData.teammate_positions[i] is not None and len(strategyData.teammate_positions[i]) >= 2)]
+            if all_indices:
+                tdists = [np.linalg.norm(np.array(strategyData.teammate_positions[i][:2]) - ball_2d) for i in all_indices]
+                nn_i = int(np.argmin(tdists))
+                nearest_unum = all_indices[nn_i] + 1
+                if nearest_unum != self.kickoff_kicker_unum and tdists[nn_i] < 0.35:
+                    self.kickoff_no_touch_deadline = 0
+
+        i_am_active = (effective_active_unum == strategyData.robot_model.unum)
+
+        if i_am_active:
+            drawer.annotation((0,10.5), "PlayOn: Active - Ball Phase", drawer.Color.yellow, "status")
+            # If I don't have the ball yet, go get it (aim body towards the ball)
+            if not has_ball:
+                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                drawer.line(tuple(mypos_2d), tuple(ball_2d), 2, drawer.Color.green, "to ball")
+                return self.move(ball_2d, orientation=desired_ori)
+
+            # I have the ball: either dribble to goal or pass if pressured
+            # If close enough to goal, take the shot
+            dist_to_goal = np.linalg.norm(np.array(goal) - mypos_2d)
+            SHOOT_DISTANCE = 3.5  # meters; conservative to ensure stable shot
+            if dist_to_goal < SHOOT_DISTANCE:
+                drawer.line(tuple(mypos_2d), goal, 3, drawer.Color.red, "shoot line")
+                # Gently wind down dribble for stability before kicking (if currently dribbling)
+                cur_name, _ = self.behavior.get_current()
+                if cur_name == "Dribble":
+                    desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(goal)
+                    # stop=True winds down dribble phase; returns True when done
+                    return self.behavior.execute("Dribble", desired_ori, True, 0.8, True)
+                return self.kickTarget(strategyData, tuple(mypos_2d), goal)
+
+            if opponent_close:
+                # Find closest teammate (exclude myself)
+                my_unum = strategyData.player_unum
+                nearest_teammate_pos = None
+                nearest_dist = float("inf")
+                for idx, mate_pos in enumerate(strategyData.teammate_positions):
+                    mate_unum = idx + 1  # teammate_positions is 0-indexed
+                    if mate_unum == my_unum:
+                        continue
+                    d = np.linalg.norm(np.array(mate_pos) - mypos_2d)
+                    if d < nearest_dist:
+                        nearest_dist = d
+                        nearest_teammate_pos = mate_pos
+
+                # Fallback: if no teammate found, kick towards goal
+                pass_target = nearest_teammate_pos if nearest_teammate_pos is not None else goal
+                drawer.line(tuple(mypos_2d), tuple(pass_target), 2, drawer.Color.red, "pass line")
+                return self.kickTarget(strategyData, tuple(mypos_2d), tuple(pass_target))
+            else:
+                # Dribble towards the opponent goal
+                drawer.line(tuple(mypos_2d), goal, 2, drawer.Color.orange, "dribble line")
+                # Drive the dribble with an absolute orientation toward goal (no walk/dribble toggling)
+                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(goal)
+                return self.behavior.execute("Dribble", desired_ori, True)
+        else:
+            # Not active: spread using role assignment so we are available for a pass
+            drawer.annotation((0,10.5), "PlayOn: Support - Formation", drawer.Color.cyan, "status")
+            # If I'm the kickoff kicker inside the no-touch window, explicitly avoid the ball
+            if self.kickoff_kicker_unum == strategyData.robot_model.unum and now < self.kickoff_no_touch_deadline:
+                # Step away from ball if too close
+                to_me = mypos_2d - ball_2d
+                d = np.linalg.norm(to_me)
+                if d < 0.6:
+                    if d < 1e-3:
+                        to_me = np.array([-1.0, 0.0])  # arbitrary safe direction
+                    else:
+                        to_me = to_me / d
+                    safe_point = mypos_2d + to_me * 0.8
+                    desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                    drawer.line(tuple(mypos_2d), tuple(safe_point), 2, drawer.Color.magenta, "avoid ball")
+                    return self.move(tuple(safe_point), orientation=desired_ori)
+            formation_positions = GenerateBasicFormation()
+            point_preferences = role_assignment(strategyData.teammate_positions, formation_positions)
+            strategyData.my_desired_position = point_preferences[strategyData.player_unum]
+            strategyData.my_desired_orientation = strategyData.GetDirectionRelativeToMyPositionAndTarget(
+                strategyData.my_desired_position)
+            drawer.line(strategyData.mypos, strategyData.my_desired_position, 2, drawer.Color.blue, "target line")
+            return self.move(strategyData.my_desired_position, orientation=strategyData.my_desired_orientation)
+
+    #--------------------------------------- Fat proxy auxiliary methods
+
+
+    def fat_proxy_kick(self):
+        w = self.world
+        r = self.world.robot 
+        ball_2d = w.ball_abs_pos[:2]
+        my_head_pos_2d = r.loc_head_position[:2]
+
+        if np.linalg.norm(ball_2d - my_head_pos_2d) < 0.25:
+            # fat proxy kick arguments: power [0,10]; relative horizontal angle [-180,180]; vertical angle [0,70]
+            self.fat_proxy_cmd += f"(proxy kick 10 {M.normalize_deg( self.kick_direction  - r.imu_torso_orientation ):.2f} 20)" 
+            self.fat_proxy_walk = np.zeros(3) # reset fat proxy walk
+            return True
+        else:
+            self.fat_proxy_move(ball_2d-(-0.1,0), None, True) # ignore obstacles
+            return False
+
+
+    def fat_proxy_move(self, target_2d, orientation, is_orientation_absolute):
+        r = self.world.robot
+
+        target_dist = np.linalg.norm(target_2d - r.loc_head_position[:2])
+        target_dir = M.target_rel_angle(r.loc_head_position[:2], r.imu_torso_orientation, target_2d)
+
+        if target_dist > 0.1 and abs(target_dir) < 8:
+            self.fat_proxy_cmd += (f"(proxy dash {100} {0} {0})")
+            return
+
+        if target_dist < 0.1:
+            if is_orientation_absolute:
+                orientation = M.normalize_deg( orientation - r.imu_torso_orientation )
+            target_dir = np.clip(orientation, -60, 60)
+            self.fat_proxy_cmd += (f"(proxy dash {0} {0} {target_dir:.1f})")
+        else:
+            self.fat_proxy_cmd += (f"(proxy dash {20} {0} {target_dir:.1f})")
