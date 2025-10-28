@@ -400,7 +400,7 @@ class Agent(Base_Agent):
                         to_me = to_me / d
                     safe_point = mypos_2d + to_me * 0.8
                     desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
-                    drawer.line(tuple(mypos_2d), tuple(safe_point), 2, drawer.Color.magenta, "avoid ball")
+                    drawer.line(tuple(mypos_2d), tuple(safe_point), 2, drawer.Color.red, "avoid ball")
                     return self.move(tuple(safe_point), orientation=desired_ori)
             formation_positions = GenerateBasicFormation()
             point_preferences = role_assignment(strategyData.teammate_positions, formation_positions)
