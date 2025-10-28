@@ -365,13 +365,15 @@ class Agent(Base_Agent):
                 nearest_teammate_pos = None
                 nearest_dist = float("inf")
                 for idx, mate_pos in enumerate(strategyData.teammate_positions):
-                    mate_unum = idx + 1  # teammate_positions is 0-indexed
-                    if mate_unum == my_unum:
+                    mate_unum = idx + 1
+                    # skip self and unknown teammate positions
+                    if mate_unum == my_unum or mate_pos is None or len(mate_pos) < 2:
                         continue
-                    d = np.linalg.norm(np.array(mate_pos) - mypos_2d)
+                    mate_pos_2d = np.array(mate_pos[:2])
+                    d = np.linalg.norm(mate_pos_2d - mypos_2d)
                     if d < nearest_dist:
                         nearest_dist = d
-                        nearest_teammate_pos = mate_pos
+                        nearest_teammate_pos = mate_pos_2d
 
                 # Fallback: if no teammate found, kick towards goal
                 pass_target = nearest_teammate_pos if nearest_teammate_pos is not None else goal
