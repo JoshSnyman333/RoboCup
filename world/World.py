@@ -212,7 +212,7 @@ class World():
         if PM in (W.M_PLAY_ON, W.M_GAME_OVER): # most common group
             self.play_mode_group = W.MG_OTHER
         elif PM in (W.M_OUR_KICKOFF, W.M_OUR_KICK_IN, W.M_OUR_CORNER_KICK, W.M_OUR_GOAL_KICK,
-                    W.M_OUR_OFFSIDE, W):
+                    W.M_OUR_OFFSIDE, W.M_OUR_PASS, W.M_OUR_DIR_FREE_KICK, W.M_OUR_FREE_KICK):
             self.play_mode_group = W.MG_OUR_KICK
         elif PM in (W.M_THEIR_KICK_IN, W.M_THEIR_CORNER_KICK, W.M_THEIR_GOAL_KICK, W.M_THEIR_OFFSIDE,
                     W.M_THEIR_PASS, W.M_THEIR_DIR_FREE_KICK, W.M_THEIR_FREE_KICK, W.M_THEIR_KICKOFF):
@@ -223,6 +223,7 @@ class World():
             self.play_mode_group = W.MG_PASSIVE_BEAM
         elif PM is not None:
             raise ValueError(f'Unexpected play mode ID: {PM}')
+
 
         r.update_pose() # update forward kinematics
 
