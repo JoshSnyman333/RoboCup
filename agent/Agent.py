@@ -29,9 +29,11 @@ class Agent(Base_Agent):
 
         self.init_pos = ([-14,0],[-9,-5],[-9,0],[-9,5],[-5,-5],[-5,0],[-5,5],[-1,-6],[-1,-2.5],[-1,2.5],[-1,6])[unum-1] # initial formation
 
-        # Kickoff state: prevent double-touch by the kicker for a brief window
+        # Kickoff state: prevent double-touch by the kicker until someone else touches the ball
+        # kicker_unum is set when we initiate the kickoff. lock_active becomes True once the ball leaves the kickoff spot
+        # and remains True until a teammate (not the kicker) or an opponent is detected as touching/nearest to the ball.
         self.kickoff_kicker_unum = None
-        self.kickoff_no_touch_deadline = 0  # world.time_local_ms timestamp
+        self.kickoff_lock_active = False
 
 
     def beam(self, avoid_center_circle=False):
@@ -184,10 +186,19 @@ class Agent(Base_Agent):
         d = self.world.draw
 
         if strategyData.play_mode == self.world.M_GAME_OVER:
+            # Reset kickoff guard state on game over
+            self.kickoff_kicker_unum = None
+            self.kickoff_lock_active = False
             pass
         elif strategyData.PM_GROUP == self.world.MG_ACTIVE_BEAM:
+            # Reset kickoff guard state when beaming
+            self.kickoff_kicker_unum = None
+            self.kickoff_lock_active = False
             self.beam()
         elif strategyData.PM_GROUP == self.world.MG_PASSIVE_BEAM:
+            # Reset kickoff guard state when beaming
+            self.kickoff_kicker_unum = None
+            self.kickoff_lock_active = False
             self.beam(True) # avoid center circle
         elif self.state == 1 or (behavior.is_ready("Get_Up") and self.fat_proxy_cmd is None):
             self.state = 0 if behavior.execute("Get_Up") else 1
@@ -195,6 +206,9 @@ class Agent(Base_Agent):
             if strategyData.play_mode != self.world.M_BEFORE_KICKOFF:
                 self.select_skill(strategyData)
             else:
+                # Before kickoff: ensure no stale lock
+                self.kickoff_kicker_unum = None
+                self.kickoff_lock_active = False
                 pass
 
 
@@ -267,16 +281,26 @@ class Agent(Base_Agent):
             goal_right = (15, 0)
             r = self.world.robot
             mypos_2d = r.loc_head_position[:2]
+            ball_2d = self.world.ball_abs_pos[:2]
+            center = np.array((0.0, 0.0))
 
+            # If the ball has left the kickoff spot, activate the double-touch lock and behave like PlayOn
+            if np.linalg.norm(ball_2d - center) > 0.25:
+                if self.kickoff_kicker_unum is not None and not self.kickoff_lock_active:
+                    self.kickoff_lock_active = True
+                return self._play_on_strategy(strategyData)
+
+            # Ball is still on the kickoff spot: select kicker and execute the first kick
             kicker_unum = strategyData.active_player_unum  # closest to the ball at kickoff
+            # Remember who the kicker is for the lock once the ball moves
+            if self.kickoff_kicker_unum is None:
+                self.kickoff_kicker_unum = kicker_unum
+
             if strategyData.robot_model.unum == kicker_unum:
                 # Visualize intent
                 drawer.annotation((0,10.5), "Our Kickoff: Kicker", drawer.Color.yellow, "status")
                 drawer.line(tuple(mypos_2d), goal_right, 2, drawer.Color.red, "kickoff kick")
-                # Directly use Basic_Kick via kickTarget (no dribble)
-                # Set double-touch prevention window (e.g., 3 seconds)
-                self.kickoff_kicker_unum = kicker_unum
-                self.kickoff_no_touch_deadline = self.world.time_local_ms + 3000
+                # Perform the initial kick (we do NOT activate the lock yet; it triggers when the ball actually moves)
                 return self.kickTarget(strategyData, tuple(mypos_2d), goal_right)
             else:
                 # Hold a simple formation while waiting for the kick
@@ -300,6 +324,10 @@ class Agent(Base_Agent):
         ball_2d = self.world.ball_abs_pos[:2]
         mypos_2d = r.loc_head_position[:2]
 
+        # If a kickoff just happened and we already know the kicker, ensure the lock is active
+        if self.kickoff_kicker_unum is not None and not self.kickoff_lock_active:
+            self.kickoff_lock_active = True
+
         # Define possession and pressure thresholds
         has_ball = np.linalg.norm(ball_2d - mypos_2d) < 0.28
         opponent_close = (getattr(strategyData, "min_opponent_ball_dist", None) is not None 
@@ -307,8 +335,7 @@ class Agent(Base_Agent):
 
         # Decide active player: the closest to the ball, with optional kickoff double-touch override
         effective_active_unum = strategyData.active_player_unum
-        now = self.world.time_local_ms
-        if (self.kickoff_kicker_unum is not None and now < self.kickoff_no_touch_deadline
+        if (self.kickoff_kicker_unum is not None and self.kickoff_lock_active
             and effective_active_unum == self.kickoff_kicker_unum):
             # Choose nearest non-kicker as temporary active player
             non_kicker_indices = [i for i in range(len(strategyData.teammate_positions)) if (i+1) != self.kickoff_kicker_unum]
@@ -324,8 +351,8 @@ class Agent(Base_Agent):
                 if candidate_unums:
                     effective_active_unum = candidate_unums[0]
 
-        # If a non-kicker already has possession, clear the restriction early
-        if self.kickoff_kicker_unum is not None and now < self.kickoff_no_touch_deadline:
+        # If a non-kicker already has possession, clear the restriction
+        if self.kickoff_kicker_unum is not None and self.kickoff_lock_active:
             # Estimate possession by checking nearest teammate to ball is not the kicker and is close
             all_indices = [i for i in range(len(strategyData.teammate_positions)) if (strategyData.teammate_positions[i] is not None and len(strategyData.teammate_positions[i]) >= 2)]
             if all_indices:
@@ -333,7 +360,13 @@ class Agent(Base_Agent):
                 nn_i = int(np.argmin(tdists))
                 nearest_unum = all_indices[nn_i] + 1
                 if nearest_unum != self.kickoff_kicker_unum and tdists[nn_i] < 0.35:
-                    self.kickoff_no_touch_deadline = 0
+                    # Another teammate touched the ball: unlock and forget the kicker
+                    self.kickoff_lock_active = False
+                    self.kickoff_kicker_unum = None
+            # Or if an opponent clearly touched the ball
+            if getattr(strategyData, "min_opponent_ball_dist", None) is not None and strategyData.min_opponent_ball_dist < 0.35:
+                self.kickoff_lock_active = False
+                self.kickoff_kicker_unum = None
 
         i_am_active = (effective_active_unum == strategyData.robot_model.unum)
 
@@ -388,8 +421,8 @@ class Agent(Base_Agent):
         else:
             # Not active: spread using role assignment so we are available for a pass
             drawer.annotation((0,10.5), "PlayOn: Support - Formation", drawer.Color.cyan, "status")
-            # If I'm the kickoff kicker inside the no-touch window, explicitly avoid the ball
-            if self.kickoff_kicker_unum == strategyData.robot_model.unum and now < self.kickoff_no_touch_deadline:
+            # If I'm the kickoff kicker while the lock is active, explicitly avoid the ball
+            if self.kickoff_kicker_unum == strategyData.robot_model.unum and self.kickoff_lock_active:
                 # Step away from ball if too close
                 to_me = mypos_2d - ball_2d
                 d = np.linalg.norm(to_me)
