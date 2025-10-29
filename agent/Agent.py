@@ -290,8 +290,89 @@ class Agent(Base_Agent):
                 return self.move(strategyData.my_desired_position, orientation=strategyData.my_desired_orientation)
 
         #------------------------------------------------------
+        # Their kick-in: create barrier around the ball so our agents stay at least 2.7m away
+        if strategyData.play_mode == self.world.M_THEIR_KICK_IN:
+            ball_2d = self.world.ball_abs_pos[:2].copy()
+            drawer.annotation((0,10.5), "Their Kick-In: Barrier", drawer.Color.yellow, "status")
+
+            radius = 2.7
+            n = max(1, len(strategyData.teammate_positions))
+
+            # place arc facing our goal (defend)
+            our_goal = (-15.0, 0.0)
+            dir_to_goal = np.degrees(np.arctan2(our_goal[1]-ball_2d[1], our_goal[0]-ball_2d[0]))
+            max_span_deg = 120.0
+            span_deg = min(max_span_deg, max(0.0, 20.0 * (n - 1)))
+            start_deg = dir_to_goal - 35 + span_deg/2.0
+            end_deg = dir_to_goal - 35 - span_deg/2.0
+            angles_deg = np.linspace(start_deg, end_deg, n)
+
+            arc_points = []
+            for ang in angles_deg:
+                a = np.deg2rad(ang)
+                p = ball_2d + radius * np.array((np.cos(a), np.sin(a)))
+                # clamp inside field bounds (optional)
+                p[0] = np.clip(p[0], -15.0, 15.0)
+                p[1] = np.clip(p[1], -10.0, 10.0)
+                arc_points.append(tuple(p))
+
+            my_idx = min(max(0, strategyData.player_unum - 1), n - 1)
+            my_target = arc_points[my_idx]
+
+            desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+            drawer.line(strategyData.mypos, my_target, 2, drawer.Color.blue, "their kickin barrier")
+            return self.move(my_target, orientation=desired_ori)
+
+        #------------------------------------------------------
+        # Our kick-in: assign closest player as kicker, others form arc around the ball
+        if strategyData.play_mode == self.world.M_OUR_KICK_IN:
+            ball_2d = self.world.ball_abs_pos[:2]
+            goal_right = (15, 0)
+            r = self.world.robot
+            mypos_2d = r.loc_head_position[:2]
+
+            # Find the kicker (closest teammate to the ball)
+            teammate_positions = strategyData.teammate_positions
+            dists = [np.linalg.norm(np.array(pos) - ball_2d) if pos is not None else float('inf') for pos in teammate_positions]
+            kicker_idx = int(np.argmin(dists))
+            kicker_unum = kicker_idx + 1
+
+            if strategyData.robot_model.unum == kicker_unum:
+                # Kicker: go to ball and kick toward goal
+                drawer.annotation((0,10.5), "Our Kick-In: Kicker", drawer.Color.yellow, "status")
+                drawer.line(tuple(mypos_2d), goal_right, 2, drawer.Color.red, "kickin kick")
+                return self.kickTarget(strategyData, tuple(mypos_2d), goal_right)
+            else:
+                # Support: form arc around the ball, facing the goal
+                drawer.annotation((0,10.5), "Our Kick-In: Support", drawer.Color.cyan, "status")
+                n = max(1, len(teammate_positions))
+                radius = 2.7
+                goal_dir = np.degrees(np.arctan2(goal_right[1] - ball_2d[1], goal_right[0] - ball_2d[0]))
+                max_span_deg = 120.0
+                span_deg = min(max_span_deg, max(0.0, 20.0 * (n - 1)))
+                start_deg = goal_dir - 35 + span_deg/2.0
+                end_deg = goal_dir - 35 - span_deg/2.0
+                angles_deg = np.linspace(start_deg, end_deg, n)
+
+                arc_points = []
+                for ang in angles_deg:
+                    a = np.deg2rad(ang)
+                    p = ball_2d + radius * np.array((np.cos(a), np.sin(a)))
+                    # clamp inside field bounds (optional)
+                    p[0] = np.clip(p[0], -15.0, 15.0)
+                    p[1] = np.clip(p[1], -10.0, 10.0)
+                    arc_points.append(tuple(p))
+
+                my_idx = min(max(0, strategyData.player_unum - 1), n - 1)
+                my_target = arc_points[my_idx]
+                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(goal_right)
+                drawer.line(strategyData.mypos, my_target, 2, drawer.Color.blue, "our kickin support")
+                return self.move(my_target, orientation=desired_ori)
+
+        #------------------------------------------------------
         # Default: no predefined behavior -> behave like PlayOn
         return self._play_on_strategy(strategyData)
+        
 
     def _play_on_strategy(self, strategyData):
         drawer = self.world.draw
