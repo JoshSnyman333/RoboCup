@@ -239,8 +239,8 @@ class Agent(Base_Agent):
                 # Arc on our half (x <= 0), centered at 180°, span up to 120°
                 max_span_deg = 120.0
                 span_deg = min(max_span_deg, max(0.0, 20.0 * (n - 1)))
-                start_deg = 180.0 + span_deg / 2.0
-                end_deg = 180.0 - span_deg / 2.0
+                start_deg = 145.0 + span_deg / 2.0
+                end_deg = 145.0 - span_deg / 2.0
                 angles_deg = np.linspace(start_deg, end_deg, n)
 
                 arc_points = []
