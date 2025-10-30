@@ -404,15 +404,6 @@ class Agent(Base_Agent):
         r = self.world.robot
         ball_2d = self.world.ball_abs_pos[:2]
         mypos_2d = r.loc_head_position[:2]
-        center = np.array((0.0, 0.0))
-
-        # --- Robust kickoff double-touch lock activation ---
-        if (
-            self.kickoff_kicker_unum is not None
-            and not self.kickoff_lock_active
-            and np.linalg.norm(ball_2d - center) > 0.25
-        ):
-            self.kickoff_lock_active = True
 
         # If a kickoff just happened and we already know the kicker, ensure the lock is active
         if self.kickoff_kicker_unum is not None and not self.kickoff_lock_active:
