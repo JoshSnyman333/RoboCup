@@ -301,7 +301,7 @@ class Agent(Base_Agent):
                 drawer.annotation((0,10.5), "Our Kickoff: Kicker", drawer.Color.yellow, "status")
                 drawer.line(tuple(mypos_2d), goal_right, 2, drawer.Color.red, "kickoff kick")
                 # Perform the initial kick (we do NOT activate the lock yet; it triggers when the ball actually moves)
-                return self.kickTarget(strategyData, tuple(mypos_2d), goal_right)
+                return self.kick_through_best_gap(strategyData, mypos_2d, ball_2d, goal_right)
             else:
                 # Hold a simple formation while waiting for the kick
                 drawer.annotation((0,10.5), "Our Kickoff: Formation", drawer.Color.cyan, "status")
@@ -365,7 +365,7 @@ class Agent(Base_Agent):
                 # Kicker: go to ball and kick toward goal
                 drawer.annotation((0,10.5), "Our Kick-In: Kicker", drawer.Color.yellow, "status")
                 drawer.line(tuple(mypos_2d), goal_right, 2, drawer.Color.red, "kickin kick")
-                return self.kickTarget(strategyData, tuple(mypos_2d), goal_right)
+                return self.kick_through_best_gap(strategyData, mypos_2d, ball_2d, goal_right)
             else:
                 # Support: form arc around the ball, facing the goal
                 drawer.annotation((0,10.5), "Our Kick-In: Support", drawer.Color.cyan, "status")
@@ -404,6 +404,15 @@ class Agent(Base_Agent):
         r = self.world.robot
         ball_2d = self.world.ball_abs_pos[:2]
         mypos_2d = r.loc_head_position[:2]
+        center = np.array((0.0, 0.0))
+
+        # --- Robust kickoff double-touch lock activation ---
+        if (
+            self.kickoff_kicker_unum is not None
+            and not self.kickoff_lock_active
+            and np.linalg.norm(ball_2d - center) > 0.25
+        ):
+            self.kickoff_lock_active = True
 
         # If a kickoff just happened and we already know the kicker, ensure the lock is active
         if self.kickoff_kicker_unum is not None and not self.kickoff_lock_active:
@@ -560,3 +569,58 @@ class Agent(Base_Agent):
             self.fat_proxy_cmd += (f"(proxy dash {0} {0} {target_dir:.1f})")
         else:
             self.fat_proxy_cmd += (f"(proxy dash {20} {0} {target_dir:.1f})")
+
+    def kick_through_best_gap(self, strategyData, mypos_2d, ball_2d, goal_2d, min_gap_width=0.5, kick_distance=10.0):
+        """
+        Kick the ball through the widest available gap towards the goal.
+        """
+        # Gather opponent positions
+        opponents = [np.array(pos) for pos in strategyData.opponent_positions if pos is not None]
+        if not opponents:
+            # No opponents: kick straight to goal
+            return self.kickTarget(strategyData, mypos_2d, goal_2d)
+
+        # Compute angles to opponents from the ball
+        angles = []
+        for opp in opponents:
+            rel = opp - ball_2d
+            angle = np.arctan2(rel[1], rel[0])
+            dist = np.linalg.norm(rel)
+            angles.append((angle, dist, opp))
+        angles.sort()
+
+        # Add "virtual" opponents at -pi and +pi to close the field
+        angles = [(-np.pi, 1000, None)] + angles + [(np.pi, 1000, None)]
+
+        # Find all gaps between sorted opponent angles
+        best_gap = None
+        best_gap_angle = None
+        goal_angle = np.arctan2(goal_2d[1] - ball_2d[1], goal_2d[0] - ball_2d[0])
+        min_angle_diff = float('inf')
+
+        for i in range(len(angles) - 1):
+            a1, d1, _ = angles[i]
+            a2, d2, _ = angles[i+1]
+            # For each gap, check if the gap at 1.5m from the ball is wide enough
+            arc1 = ball_2d + 1.5 * np.array([np.cos(a1), np.sin(a1)])
+            arc2 = ball_2d + 1.5 * np.array([np.cos(a2), np.sin(a2)])
+            gap_width = np.linalg.norm(arc2 - arc1)
+            if gap_width >= min_gap_width:
+                gap_center = (a1 + a2) / 2
+                # Only consider gaps whose center is within ±90° of the goal direction
+                center_diff = np.arctan2(np.sin(gap_center - goal_angle), np.cos(gap_center - goal_angle))
+                if abs(center_diff) > np.pi / 2:
+                    continue  # Skip gaps that are too far from the goal direction
+                angle_diff = abs(center_diff)
+                if angle_diff < min_angle_diff:
+                    min_angle_diff = angle_diff
+                    best_gap = (a1, a2)
+                    best_gap_angle = gap_center
+
+        if best_gap is not None:
+            # Kick through the center of the best gap
+            target = ball_2d + kick_distance * np.array([np.cos(best_gap_angle), np.sin(best_gap_angle)])
+            return self.kickTarget(strategyData, mypos_2d, target)
+        else:
+            # No gap found: fallback to goal
+            return self.kickTarget(strategyData, mypos_2d, goal_2d)
