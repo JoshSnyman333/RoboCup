@@ -394,6 +394,59 @@ class Agent(Base_Agent):
                 return self.move(my_target, orientation=desired_ori)
 
         #------------------------------------------------------
+        # Our goal kick: only the goalie moves, others hold formation
+        if strategyData.play_mode == self.world.M_OUR_GOAL_KICK:
+            ball_2d = self.world.ball_abs_pos[:2]
+            goal_right = (15, 0)
+            r = self.world.robot
+            mypos_2d = r.loc_head_position[:2]
+
+            # Only the goalie (usually unum == 1) takes the goal kick
+            if strategyData.robot_model.unum == 1:
+                # Find closest opponent to the ball
+                opponents = [np.array(pos) for pos in strategyData.opponent_positions if pos is not None]
+                if opponents:
+                    dists = [np.linalg.norm(opp - ball_2d) for opp in opponents]
+                    closest_opp = opponents[int(np.argmin(dists))]
+                    rel = closest_opp - ball_2d
+                    opp_angle = np.arctan2(rel[1], rel[0])
+
+                    # Candidate directions: 1 radian left/right of opponent
+                    angle_offset = np.deg2rad(30)
+                    left_angle = opp_angle + angle_offset
+                    right_angle = opp_angle - angle_offset
+
+                    # Direction to goal
+                    goal_angle = np.arctan2(goal_right[1] - ball_2d[1], goal_right[0] - ball_2d[0])
+
+                    # Compute angle difference to goal for both candidates
+                    left_diff = abs(np.arctan2(np.sin(left_angle - goal_angle), np.cos(left_angle - goal_angle)))
+                    right_diff = abs(np.arctan2(np.sin(right_angle - goal_angle), np.cos(right_angle - goal_angle)))
+
+                    # Pick the direction closer to the goal
+                    best_angle = left_angle if left_diff < right_diff else right_angle
+                    target = ball_2d + 10.0 * np.array([np.cos(best_angle), np.sin(best_angle)])
+
+                    drawer = self.world.draw
+                    drawer.annotation((0,10.5), "Our Goal Kick: Goalie", drawer.Color.yellow, "status")
+                    drawer.line(tuple(mypos_2d), tuple(target), 2, drawer.Color.red, "goal kick")
+                    return self.kickTarget(strategyData, mypos_2d, target)
+                else:
+                    # No opponents: kick straight to goal
+                    return self.kickTarget(strategyData, mypos_2d, goal_right)
+            else:
+                # Other players: move to support positions (reuse formation or arc logic as desired)
+                formation_positions = GenerateBasicFormation()
+                point_preferences = role_assignment(strategyData.teammate_positions, formation_positions)
+                strategyData.my_desired_position = point_preferences[strategyData.player_unum]
+                strategyData.my_desired_orientation = strategyData.GetDirectionRelativeToMyPositionAndTarget(
+                    strategyData.my_desired_position)
+                drawer = self.world.draw
+                drawer.annotation((0,10.5), "Our Goal Kick: Support", drawer.Color.cyan, "status")
+                drawer.line(strategyData.mypos, strategyData.my_desired_position, 2, drawer.Color.blue, "goal kick support")
+                return self.move(strategyData.my_desired_position, orientation=strategyData.my_desired_orientation)
+
+        #------------------------------------------------------
         # Default: no predefined behavior -> behave like PlayOn
         return self._play_on_strategy(strategyData)
         
