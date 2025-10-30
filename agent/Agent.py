@@ -362,10 +362,24 @@ class Agent(Base_Agent):
             kicker_unum = kicker_idx + 1
 
             if strategyData.robot_model.unum == kicker_unum:
-                # Kicker: go to ball and kick toward goal
-                drawer.annotation((0,10.5), "Our Kick-In: Kicker", drawer.Color.yellow, "status")
-                drawer.line(tuple(mypos_2d), goal_right, 2, drawer.Color.red, "kickin kick")
-                return self.kick_through_best_gap(strategyData, mypos_2d, ball_2d, goal_right)
+                if self.kickoff_lock_active:
+                    # If lock is active, kicker must avoid the ball
+                    to_me = mypos_2d - ball_2d
+                    d = np.linalg.norm(to_me)
+                    if d < 0.6:
+                        if d < 1e-3:
+                            to_me = np.array([-1.0, 0.0])
+                        else:
+                            to_me = to_me / d
+                        safe_point = mypos_2d + to_me * 0.8
+                        desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                        drawer.line(tuple(mypos_2d), tuple(safe_point), 2, drawer.Color.red, "avoid ball")
+                        return self.move(tuple(safe_point), orientation=desired_ori)
+                else:
+                    # Kicker: go to ball and kick toward goal
+                    drawer.annotation((0,10.5), "Our Kick-In: Kicker", drawer.Color.yellow, "status")
+                    drawer.line(tuple(mypos_2d), goal_right, 2, drawer.Color.red, "kickin kick")
+                    return self.kick_through_best_gap(strategyData, mypos_2d, ball_2d, goal_right)
             else:
                 # Support: form arc around the ball, facing the goal
                 drawer.annotation((0,10.5), "Our Kick-In: Support", drawer.Color.cyan, "status")
