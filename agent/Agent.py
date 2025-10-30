@@ -34,6 +34,8 @@ class Agent(Base_Agent):
         # and remains True until a teammate (not the kicker) or an opponent is detected as touching/nearest to the ball.
         self.kickoff_kicker_unum = None
         self.kickoff_lock_active = False
+        self.last_restart_ball_pos = None
+        self.last_restart_mode = None
 
 
     def beam(self, avoid_center_circle=False):
@@ -189,16 +191,22 @@ class Agent(Base_Agent):
             # Reset kickoff guard state on game over
             self.kickoff_kicker_unum = None
             self.kickoff_lock_active = False
+            self.last_restart_ball_pos = None
+            self.last_restart_mode = None
             pass
         elif strategyData.PM_GROUP == self.world.MG_ACTIVE_BEAM:
             # Reset kickoff guard state when beaming
             self.kickoff_kicker_unum = None
             self.kickoff_lock_active = False
+            self.last_restart_ball_pos = None
+            self.last_restart_mode = None
             self.beam()
         elif strategyData.PM_GROUP == self.world.MG_PASSIVE_BEAM:
             # Reset kickoff guard state when beaming
             self.kickoff_kicker_unum = None
             self.kickoff_lock_active = False
+            self.last_restart_ball_pos = None
+            self.last_restart_mode = None
             self.beam(True) # avoid center circle
         elif self.state == 1 or (behavior.is_ready("Get_Up") and self.fat_proxy_cmd is None):
             self.state = 0 if behavior.execute("Get_Up") else 1
@@ -209,6 +217,8 @@ class Agent(Base_Agent):
                 # Before kickoff: ensure no stale lock
                 self.kickoff_kicker_unum = None
                 self.kickoff_lock_active = False
+                self.last_restart_ball_pos = None
+                self.last_restart_mode = None
                 pass
 
 
@@ -284,17 +294,22 @@ class Agent(Base_Agent):
             ball_2d = self.world.ball_abs_pos[:2]
             center = np.array((0.0, 0.0))
 
-            # If the ball has left the kickoff spot, activate the double-touch lock and behave like PlayOn
-            if np.linalg.norm(ball_2d - center) > 0.25:
-                if self.kickoff_kicker_unum is not None and not self.kickoff_lock_active:
-                    self.kickoff_lock_active = True
-                return self._play_on_strategy(strategyData)
-
             # Ball is still on the kickoff spot: select kicker and execute the first kick
             kicker_unum = strategyData.active_player_unum  # closest to the ball at kickoff
             # Remember who the kicker is for the lock once the ball moves
             if self.kickoff_kicker_unum is None:
                 self.kickoff_kicker_unum = kicker_unum
+                self.last_restart_ball_pos = np.array(ball_2d)
+                self.last_restart_mode = strategyData.play_mode
+
+            # If the ball has left the kickoff spot, activate the double-touch lock and behave like PlayOn
+            if (
+                self.kickoff_kicker_unum is not None and not self.kickoff_lock_active
+                and self.last_restart_ball_pos is not None
+                and np.linalg.norm(np.array(ball_2d) - self.last_restart_ball_pos) > 0.25
+            ):
+                self.kickoff_lock_active = True
+                return self._play_on_strategy(strategyData)
 
             if strategyData.robot_model.unum == kicker_unum:
                 # Visualize intent
@@ -360,6 +375,20 @@ class Agent(Base_Agent):
             dists = [np.linalg.norm(np.array(pos) - ball_2d) if pos is not None else float('inf') for pos in teammate_positions]
             kicker_idx = int(np.argmin(dists))
             kicker_unum = kicker_idx + 1
+
+            # Remember who the kicker is for the lock once the ball moves
+            if self.kickoff_kicker_unum is None:
+                self.kickoff_kicker_unum = kicker_unum
+                self.last_restart_ball_pos = np.array(ball_2d)
+                self.last_restart_mode = strategyData.play_mode
+
+            # Activate the double-touch lock if the ball has moved from the restart spot
+            if (
+                self.kickoff_kicker_unum is not None and not self.kickoff_lock_active
+                and self.last_restart_ball_pos is not None
+                and np.linalg.norm(np.array(ball_2d) - self.last_restart_ball_pos) > 0.25
+            ):
+                self.kickoff_lock_active = True
 
             if strategyData.robot_model.unum == kicker_unum:
                 if self.kickoff_lock_active:
