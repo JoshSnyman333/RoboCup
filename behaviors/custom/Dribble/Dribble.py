@@ -189,7 +189,12 @@ class Dribble():
                     dribble_target = None # go to goal
                 self.env.dribble_rel_orientation = self.path_manager.get_dribble_path(optional_2d_target=dribble_target)[1]
             elif is_orientation_absolute:
-                self.env.dribble_rel_orientation = M.normalize_deg( orientation - r.imu_torso_orientation )
+                # When a specific orientation is given, we can still use the path planner to avoid opponents.
+                # We'll use the orientation to define a far-away point and ask the dribble path planner to go there.
+                # This combines the desired direction with obstacle avoidance.
+                current_pos = np.array(me)
+                far_point = current_pos + 10 * np.array([np.cos(np.radians(orientation)), np.sin(np.radians(orientation))])
+                self.env.dribble_rel_orientation = self.path_manager.get_dribble_path(optional_2d_target=tuple(far_point))[1]
             else:
                 self.env.dribble_rel_orientation = float(orientation) # copy if numpy float
 
