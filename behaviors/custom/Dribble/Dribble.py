@@ -159,7 +159,24 @@ class Dribble():
             self.phase += 1
         elif self.phase == 1: # dribble
             #------------------------ 1. Define dribble parameters 
-            self.env.dribble_speed = speed
+            # Default requested speed
+            # If we are dribbling toward the opponent goal (orientation is None),
+            # reduce speed smoothly when within SLOWDOWN_RADIUS to avoid tumbling
+            # over the ball when arriving at the goal.
+            if orientation is None:
+                goal = np.array((15.0, 0.0))
+                dist_to_goal = np.linalg.norm(goal - me)
+                SLOWDOWN_RADIUS = 4.0  # meters: start braking inside this radius
+                MIN_APPROACH_SPEED = 0.25  # never go below this fraction of speed
+                if dist_to_goal < SLOWDOWN_RADIUS:
+                    # linear scale factor based on remaining distance (clamped)
+                    factor = max(MIN_APPROACH_SPEED, dist_to_goal / SLOWDOWN_RADIUS)
+                    self.env.dribble_speed = float(speed) * float(factor)
+                else:
+                    self.env.dribble_speed = speed
+            else:
+                # orientation specified (not necessarily goal-directed) -> use requested speed
+                self.env.dribble_speed = speed
         
             # Relative orientation values are decreased to avoid overshoot
             if orientation is None:

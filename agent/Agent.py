@@ -725,7 +725,7 @@ class Agent(Base_Agent):
             SHOOT_DISTANCE = 3.5  # meters; conservative to ensure stable shot
             if dist_to_goal < SHOOT_DISTANCE:
                 drawer.line(tuple(mypos_2d), goal, 3, drawer.Color.red, "shoot line")
-                # Gently wind down dribble for stability before kicking (if currently dribbling)
+                # If currently dribbling, wind down first for a stable shot; otherwise kick.
                 cur_name, _ = self.behavior.get_current()
                 if cur_name == "Dribble":
                     desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(goal)
@@ -733,8 +733,13 @@ class Agent(Base_Agent):
                     return self.behavior.execute("Dribble", desired_ori, True, 0.8, True)
                 return self.kickTarget(strategyData, tuple(mypos_2d), goal)
 
-            if opponent_close:
-                # Find closest teammate (exclude myself)
+            # Default when I have the ball: prioritize stable, continuous dribbling toward goal.
+            # Reduce pass-by-pressure aggressiveness: only pass if opponent is very close AND a clearly better teammate exists.
+            desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(goal)
+            # Slightly stricter threshold to avoid giving up dribble too early
+            OPPONENT_PRESSURE_THRESHOLD = 0.9
+            if opponent_close and getattr(strategyData, "min_opponent_ball_dist", 999) < OPPONENT_PRESSURE_THRESHOLD:
+                # existing logic: look for a pass candidate (nearest teammate, excluding self)
                 my_unum = strategyData.player_unum
                 nearest_teammate_pos = None
                 nearest_dist = float("inf")
@@ -749,16 +754,15 @@ class Agent(Base_Agent):
                         nearest_dist = d
                         nearest_teammate_pos = mate_pos_2d
 
-                # Fallback: if no teammate found, kick towards goal
-                pass_target = nearest_teammate_pos if nearest_teammate_pos is not None else goal
-                drawer.line(tuple(mypos_2d), tuple(pass_target), 2, drawer.Color.red, "pass line")
-                return self.kickTarget(strategyData, tuple(mypos_2d), tuple(pass_target))
-            else:
-                # Dribble towards the opponent goal
-                drawer.line(tuple(mypos_2d), goal, 2, drawer.Color.orange, "dribble line")
-                # Drive the dribble with an absolute orientation toward goal (no walk/dribble toggling)
-                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(goal)
-                return self.behavior.execute("Dribble", desired_ori, True)
+                # Only consider the pass if teammate is clearly open (not just marginally)
+                if nearest_teammate_pos is not None and nearest_dist < 3.5:
+                    drawer.line(tuple(mypos_2d), tuple(nearest_teammate_pos), 2, drawer.Color.red, "pass line")
+                    return self.kickTarget(strategyData, tuple(mypos_2d), tuple(nearest_teammate_pos))
+
+            # Otherwise, continue dribbling aggressively toward the goal.
+            # Use Dribble behavior directly to avoid walking + replanning jitter.
+            drawer.line(tuple(mypos_2d), goal, 2, drawer.Color.orange, "dribble line")
+            return self.behavior.execute("Dribble", desired_ori, True, 1.0, False)
         else:
             # Not active: spread using role assignment so we are available for a pass
             drawer.annotation((0,10.5), "PlayOn: Support - Formation", drawer.Color.cyan, "status")
