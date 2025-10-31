@@ -37,6 +37,10 @@ class Agent(Base_Agent):
         self.last_restart_ball_pos = None
         self.last_restart_mode = None
 
+        # Goalie specific variables
+        self.goalie_can_take_ball = False
+        self.goalie_last_holder_unum = None
+
 
     def beam(self, avoid_center_circle=False):
         r = self.world.robot
@@ -654,6 +658,101 @@ class Agent(Base_Agent):
                 return self.move(strategyData.my_desired_position, orientation=strategyData.my_desired_orientation)
 
         #------------------------------------------------------
+        # Our corner kick: kick ball at 20 degree angle
+        if strategyData.play_mode == self.world.M_OUR_CORNER_KICK:
+            ball_2d = self.world.ball_abs_pos[:2]
+            goal = (15, 0)
+            r = self.world.robot
+            mypos_2d = r.loc_head_position[:2]
+
+            # Find the kicker (closest teammate to the ball)
+            teammate_positions = strategyData.teammate_positions
+            dists = [np.linalg.norm(np.array(pos) - ball_2d) if pos is not None else float('inf') for pos in teammate_positions]
+            kicker_idx = int(np.argmin(dists))
+            kicker_unum = kicker_idx + 1
+
+            # Determine which corner we're in
+            # Corners: (-15, -10), (-15, 10), (15, -10), (15, 10)
+            # We'll always kick 20 degrees toward the field from the corner
+            field_angle = 0  # default: right field
+            if abs(ball_2d[0] + 15) < 1.0:  # left side
+                if ball_2d[1] > 0:  # top left
+                    field_angle = np.deg2rad(20)  # 20 deg down from +x (right)
+                else:  # bottom left
+                    field_angle = np.deg2rad(-20)  # 20 deg up from +x (right)
+            elif abs(ball_2d[0] - 15) < 1.0:  # right side
+                if ball_2d[1] > 0:  # top right
+                    field_angle = np.pi - np.deg2rad(20)  # 20 deg down from -x (left)
+                else:  # bottom right
+                    field_angle = -np.pi + np.deg2rad(20)  # 20 deg up from -x (left)
+
+            kick_distance = 8.0  # or any reasonable value
+            target = ball_2d + kick_distance * np.array([np.cos(field_angle), np.sin(field_angle)])
+
+            if strategyData.robot_model.unum == kicker_unum:
+                drawer = self.world.draw
+                drawer.annotation((0,10.5), "Our Corner: Kicker", drawer.Color.yellow, "status")
+                drawer.line(tuple(mypos_2d), tuple(target), 2, drawer.Color.red, "corner kick")
+                return self.kickTarget(strategyData, mypos_2d, target)
+            else:
+                # Support: form arc around the ball, facing the field
+                drawer.annotation((0,10.5), "Our Corner: Support", drawer.Color.cyan, "status")
+                n = max(1, len(teammate_positions))
+                radius = 2.7
+                arc_center_angle = np.degrees(field_angle)
+                max_span_deg = 120.0
+                span_deg = min(max_span_deg, max(0.0, 20.0 * (n - 1)))
+                angles_deg = np.linspace(arc_center_angle + span_deg/2.0, arc_center_angle - span_deg/2.0, n)
+
+                arc_points = []
+                for ang in angles_deg:
+                    a = np.deg2rad(ang)
+                    p = ball_2d + radius * np.array((np.cos(a), np.sin(a)))
+                    p[0] = np.clip(p[0], -15.0, 15.0)
+                    p[1] = np.clip(p[1], -10.0, 10.0)
+                    arc_points.append(tuple(p))
+
+                my_idx = min(max(0, strategyData.player_unum - 1), n - 1)
+                my_target = arc_points[my_idx]
+                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(target)
+                drawer.line(strategyData.mypos, my_target, 2, drawer.Color.blue, "our corner support")
+                return self.move(my_target, orientation=desired_ori)
+
+        #------------------------------------------------------
+        # Their corner kick: form arc around ball
+        if strategyData.play_mode == self.world.M_THEIR_CORNER_KICK:
+            ball_2d = self.world.ball_abs_pos[:2].copy()
+            drawer.annotation((0,10.5), "Their Corner: Barrier", drawer.Color.yellow, "status")
+
+            radius = 2.7
+            n = max(1, len(strategyData.teammate_positions))
+
+            # Place arc facing our goal (defend)
+            our_goal = (-15.0, 0.0)
+            dir_to_goal = np.degrees(np.arctan2(our_goal[1] - ball_2d[1], our_goal[0] - ball_2d[0]))
+            max_span_deg = 120.0
+            span_deg = min(max_span_deg, max(0.0, 20.0 * (n - 1)))
+            start_deg = dir_to_goal - 35 + span_deg/2.0
+            end_deg = dir_to_goal - 35 - span_deg/2.0
+            angles_deg = np.linspace(start_deg, end_deg, n)
+
+            arc_points = []
+            for ang in angles_deg:
+                a = np.deg2rad(ang)
+                p = ball_2d + radius * np.array((np.cos(a), np.sin(a)))
+                # clamp inside field bounds (optional)
+                p[0] = np.clip(p[0], -15.0, 15.0)
+                p[1] = np.clip(p[1], -10.0, 10.0)
+                arc_points.append(tuple(p))
+
+            my_idx = min(max(0, strategyData.player_unum - 1), n - 1)
+            my_target = arc_points[my_idx]
+
+            desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+            drawer.line(strategyData.mypos, my_target, 2, drawer.Color.blue, "their corner barrier")
+            return self.move(my_target, orientation=desired_ori)
+
+        #------------------------------------------------------
         # Default: no predefined behavior -> behave like PlayOn
         return self._play_on_strategy(strategyData)
         
@@ -664,6 +763,106 @@ class Agent(Base_Agent):
         r = self.world.robot
         ball_2d = self.world.ball_abs_pos[:2]
         mypos_2d = r.loc_head_position[:2]
+
+        # --- Goalie logic (agent 1) ---
+        if strategyData.robot_model.unum == 1:
+            our_goal_center = np.array([-15.0, 0.0])
+            ball_vec = ball_2d - our_goal_center
+            ball_dist = np.linalg.norm(ball_vec)
+            ball_dir = ball_vec / (ball_dist + 1e-6)
+
+            # Only consider taking the ball if it's within 3m of the goal
+            if ball_dist < 3.0:
+                # Find the closest agent (not the goalie) to the ball
+                min_dist = float('inf')
+                closest_holder_unum = None
+                closest_holder_is_teammate = False
+                # Teammates (excluding self)
+                for idx, pos in enumerate(strategyData.teammate_positions):
+                    if pos is not None and len(pos) >= 2 and not np.allclose(pos[:2], mypos_2d):
+                        dist = np.linalg.norm(np.array(pos[:2]) - ball_2d)
+                        if dist < min_dist and dist < 0.35:  # possession threshold
+                            min_dist = dist
+                            closest_holder_unum = idx + 1
+                            closest_holder_is_teammate = True
+                # Opponents
+                for idx, pos in enumerate(strategyData.opponent_positions):
+                    if pos is not None and len(pos) >= 2:
+                        dist = np.linalg.norm(np.array(pos[:2]) - ball_2d)
+                        if dist < min_dist and dist < 0.35:
+                            min_dist = dist
+                            closest_holder_unum = -(idx + 1)  # negative for opponent
+                            closest_holder_is_teammate = False
+
+                # Check if goalie itself has the ball
+                goalie_has_ball = np.linalg.norm(mypos_2d - ball_2d) < 0.28
+
+                # Logic:
+                # 1. If goalie_can_take_ball is False, wait/defend until closest_holder_unum loses the ball
+                # 2. If closest_holder_unum is None (no one has the ball), set goalie_can_take_ball = True
+                # 3. If goalie_can_take_ball is True, allow goalie to take and kick the ball
+                # 4. If goalie loses the ball, reset goalie_can_take_ball to False
+
+                if not self.goalie_can_take_ball:
+                    # Track who is holding the ball
+                    if closest_holder_unum is not None:
+                        self.goalie_last_holder_unum = closest_holder_unum
+                        # Wait/defend as usual
+                        desired_dist = min(1.5, ball_dist - 0.3) if ball_dist > 0.3 else 0.3
+                        target_pos = our_goal_center + ball_dir * desired_dist
+                        drawer.annotation((0,10.5), "Goalie: Waiting for holder to lose ball", drawer.Color.yellow, "status")
+                        drawer.line(tuple(mypos_2d), tuple(target_pos), 2, drawer.Color.blue, "goalie block")
+                        desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                        return self.move(target_pos, orientation=desired_ori)
+                    else:
+                        # No one has the ball: allow goalie to take it
+                        self.goalie_can_take_ball = True
+                        self.goalie_last_holder_unum = None
+
+                # If goalie_can_take_ball is True, try to take and kick the ball
+                if self.goalie_can_take_ball:
+                    if goalie_has_ball:
+                        # Kick to goal
+                        drawer.annotation((0,10.5), "Goalie: Kick to Goal", drawer.Color.yellow, "status")
+                        return self.kickTarget(strategyData, mypos_2d, goal)
+                    else:
+                        # Move to ball to take possession
+                        drawer.annotation((0,10.5), "Goalie: Go to Ball", drawer.Color.yellow, "status")
+                        desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                        drawer.line(tuple(mypos_2d), tuple(ball_2d), 2, drawer.Color.green, "goalie to ball")
+                        # If goalie is close but doesn't have the ball, keep trying
+                        if np.linalg.norm(mypos_2d - ball_2d) < 0.35:
+                            # If another agent gets the ball, go back to waiting
+                            if closest_holder_unum is not None and not goalie_has_ball:
+                                self.goalie_can_take_ball = False
+                                self.goalie_last_holder_unum = closest_holder_unum
+                                desired_dist = min(1.5, ball_dist - 0.3) if ball_dist > 0.3 else 0.3
+                                target_pos = our_goal_center + ball_dir * desired_dist
+                                drawer.annotation((0,10.5), "Goalie: Waiting for holder to lose ball", drawer.Color.yellow, "status")
+                                drawer.line(tuple(mypos_2d), tuple(target_pos), 2, drawer.Color.blue, "goalie block")
+                                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                                return self.move(target_pos, orientation=desired_ori)
+                        return self.move(ball_2d, orientation=desired_ori)
+
+                # If goalie had the ball but now lost it, reset flag
+                if self.goalie_can_take_ball and not goalie_has_ball:
+                    self.goalie_can_take_ball = False
+
+                # Default: wait/defend
+                desired_dist = min(1.5, ball_dist - 0.3) if ball_dist > 0.3 else 0.3
+                target_pos = our_goal_center + ball_dir * desired_dist
+                drawer.annotation((0,10.5), "Goalie: Block", drawer.Color.yellow, "status")
+                drawer.line(tuple(mypos_2d), tuple(target_pos), 2, drawer.Color.blue, "goalie block")
+                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                return self.move(target_pos, orientation=desired_ori)
+
+            # If the ball is not within 3m of the goal, always wait/defend
+            desired_dist = min(1.5, ball_dist - 0.3) if ball_dist > 0.3 else 0.3
+            target_pos = our_goal_center + ball_dir * desired_dist
+            drawer.annotation((0,10.5), "Goalie: Block (ball too far)", drawer.Color.yellow, "status")
+            drawer.line(tuple(mypos_2d), tuple(target_pos), 2, drawer.Color.blue, "goalie block")
+            desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+            return self.move(target_pos, orientation=desired_ori)
 
         # If a kickoff just happened and we already know the kicker, ensure the lock is active
         if self.kickoff_kicker_unum is not None and not self.kickoff_lock_active:
@@ -722,7 +921,7 @@ class Agent(Base_Agent):
             # I have the ball: either dribble to goal or pass if pressured
             # If close enough to goal, take the shot
             dist_to_goal = np.linalg.norm(np.array(goal) - mypos_2d)
-            SHOOT_DISTANCE = 3.5  # meters; conservative to ensure stable shot
+            SHOOT_DISTANCE = 2.25  # meters; conservative to ensure stable shot
             if dist_to_goal < SHOOT_DISTANCE:
                 drawer.line(tuple(mypos_2d), goal, 3, drawer.Color.red, "shoot line")
                 # If currently dribbling, wind down first for a stable shot; otherwise kick.
