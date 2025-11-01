@@ -713,52 +713,58 @@ class Agent(Base_Agent):
 
         if i_am_active:
             drawer.annotation((0,10.5), "PlayOn: Active - Ball Phase", drawer.Color.yellow, "status")
-            # If I don't have the ball yet, go get it (aim body towards the ball)
-            if not has_ball:
-                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
-                drawer.line(tuple(mypos_2d), tuple(ball_2d), 2, drawer.Color.green, "to ball")
-                return self.move(ball_2d, orientation=desired_ori)
+            #--- REPLACED: use only kickTarget and move (no Dribble) ---
+            goal = (15.0, 0.0)
+            r = self.world.robot
+            mypos_2d = r.loc_head_position[:2]
+            ball_2d = self.world.ball_abs_pos[:2]
+            has_ball = np.linalg.norm(ball_2d - mypos_2d) < 0.28
+            opponent_close = (getattr(strategyData, "min_opponent_ball_dist", None) is not None 
+                              and strategyData.min_opponent_ball_dist < 1.2)
 
-            # I have the ball: either dribble to goal or pass if pressured
-            # If close enough to goal, take the shot
-            dist_to_goal = np.linalg.norm(np.array(goal) - mypos_2d)
-            SHOOT_DISTANCE = 3.5  # meters; conservative to ensure stable shot
-            if dist_to_goal < SHOOT_DISTANCE:
-                drawer.line(tuple(mypos_2d), goal, 3, drawer.Color.orange, "dribble into goal")
-                # Dribble into the goal instead of kicking
+            if has_ball:
+                # 1) If within shooting range -> shoot
+                dist_to_goal = np.linalg.norm(np.array(goal) - mypos_2d)
+                SHOOT_DISTANCE = 3.5
+                if dist_to_goal < SHOOT_DISTANCE:
+                    return self.kickTarget(strategyData, tuple(mypos_2d), goal)
+
+                # 2) If pressured, try to pass to an open teammate (closer to goal)
+                if opponent_close:
+                    best_teammate = None
+                    best_score = float('inf')
+                    for idx, mate_pos in enumerate(strategyData.teammate_positions):
+                        if mate_pos is None: 
+                            continue
+                        mate_unum = idx + 1
+                        if mate_unum == strategyData.robot_model.unum:
+                            continue
+                        mate_pos_2d = np.array(mate_pos[:2])
+                        # prefer teammates closer to opponent goal and within reasonable pass distance
+                        score = np.linalg.norm(np.array(goal) - mate_pos_2d)
+                        pass_dist = np.linalg.norm(mate_pos_2d - mypos_2d)
+                        if pass_dist <= 6.0 and score < best_score:
+                            best_score = score
+                            best_teammate = mate_pos_2d
+                    if best_teammate is not None:
+                        return self.kickTarget(strategyData, tuple(mypos_2d), tuple(best_teammate))
+
+                # 3) Default: step toward goal using move (short step to avoid overshoot)
                 desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(goal)
-                return self.behavior.execute("Dribble", desired_ori, True, 1.0, False)
+                dir_vec = np.array(goal) - mypos_2d
+                dir_dist = np.linalg.norm(dir_vec)
+                step = min(2.0, dir_dist) if dir_dist > 1e-6 else 0.0
+                if step > 0:
+                    target = tuple(mypos_2d + (dir_vec / dir_dist) * step)
+                else:
+                    target = goal
+                return self.move(target, orientation=desired_ori, is_orientation_absolute=True)
 
-            # Default when I have the ball: prioritize stable, continuous dribbling toward goal.
-            # Reduce pass-by-pressure aggressiveness: only pass if opponent is very close AND a clearly better teammate exists.
-            desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(goal)
-            # Slightly stricter threshold to avoid giving up dribble too early
-            OPPONENT_PRESSURE_THRESHOLD = 0.9
-            if opponent_close and getattr(strategyData, "min_opponent_ball_dist", 999) < OPPONENT_PRESSURE_THRESHOLD:
-                # existing logic: look for a pass candidate (nearest teammate, excluding self)
-                my_unum = strategyData.player_unum
-                nearest_teammate_pos = None
-                nearest_dist = float("inf")
-                for idx, mate_pos in enumerate(strategyData.teammate_positions):
-                    mate_unum = idx + 1
-                    # skip self and unknown teammate positions
-                    if mate_unum == my_unum or mate_pos is None or len(mate_pos) < 2:
-                        continue
-                    mate_pos_2d = np.array(mate_pos[:2])
-                    d = np.linalg.norm(mate_pos_2d - mypos_2d)
-                    if d < nearest_dist:
-                        nearest_dist = d
-                        nearest_teammate_pos = mate_pos_2d
-
-                # Only consider the pass if teammate is clearly open (not just marginally)
-                if nearest_teammate_pos is not None and nearest_dist < 3.5:
-                    drawer.line(tuple(mypos_2d), tuple(nearest_teammate_pos), 2, drawer.Color.red, "pass line")
-                    return self.kickTarget(strategyData, tuple(mypos_2d), tuple(nearest_teammate_pos))
-
-            # Otherwise, continue dribbling aggressively toward the goal.
-            # Use Dribble behavior directly to avoid walking + replanning jitter.
-            drawer.line(tuple(mypos_2d), goal, 2, drawer.Color.orange, "dribble line")
-            return self.behavior.execute("Dribble", desired_ori, True, 1.0, False)
+            else:
+                # Not in possession: go to the ball and face it
+                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                return self.move(tuple(ball_2d), orientation=desired_ori, is_orientation_absolute=True)
+            #--- END REPLACEMENT ---
         else:
             # Not active: spread using role assignment so we are available for a pass
             drawer.annotation((0,10.5), "PlayOn: Support - Formation", drawer.Color.cyan, "status")
