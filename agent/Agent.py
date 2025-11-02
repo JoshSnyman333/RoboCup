@@ -787,39 +787,49 @@ class Agent(Base_Agent):
 
         i_am_active = (effective_active_unum == strategyData.robot_model.unum)
 
-        if i_am_active:
-            drawer.annotation((0,10.5), "PlayOn: Active - Kick Hard", drawer.Color.yellow, "status")
+        # --- New strategy: two closest agents try to kick, others standby or support ---
+        teammate_positions = strategyData.teammate_positions
+        my_unum = strategyData.player_unum
+        all_agents = []
+        for idx, pos in enumerate(teammate_positions):
+            if pos is not None and len(pos) >= 2:
+                dist = np.linalg.norm(np.array(pos[:2]) - ball_2d)
+                all_agents.append((dist, idx + 1))
+        all_agents.sort()
+        closest_dist, closest_unum = all_agents[0]
+        second_closest_dist, second_closest_unum = all_agents[1] if len(all_agents) > 1 else (float('inf'), None)
+
+        # Only the two closest agents ever try to approach and kick the ball
+        if my_unum == closest_unum or my_unum == second_closest_unum:
+            # If I'm not the closest and the closest is within 0.5m, stand by 1.5m away facing the ball
+            if my_unum != closest_unum and closest_dist < 0.5:
+                standby_vec = (np.array(ball_2d) - np.array(mypos_2d))
+                standby_vec = standby_vec / (np.linalg.norm(standby_vec) + 1e-6)
+                standby_pos = np.array(ball_2d) - standby_vec * 1.5
+                desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                drawer.annotation((0,10.5), "Standby: Closest agent is kicking", drawer.Color.cyan, "status")
+                drawer.line(tuple(mypos_2d), tuple(standby_pos), 2, drawer.Color.blue, "standby line")
+                return self.move(tuple(standby_pos), orientation=desired_ori)
+            # Otherwise, try to kick the ball to the goal
+            has_ball = np.linalg.norm(ball_2d - mypos_2d) < 0.28
             if not has_ball:
                 desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
+                drawer.annotation((0,10.5), "Go to Ball", drawer.Color.yellow, "status")
                 drawer.line(tuple(mypos_2d), tuple(ball_2d), 2, drawer.Color.green, "to ball")
                 return self.move(ball_2d, orientation=desired_ori)
-            # If I have the ball, kick as hard as possible to the goal
+            drawer.annotation((0,10.5), "Kick to Goal", drawer.Color.yellow, "status")
             drawer.line(tuple(mypos_2d), goal, 3, drawer.Color.red, "kick to goal")
             return self.kickTarget(strategyData, tuple(mypos_2d), goal)
-        else:
-            # Not active: spread using role assignment so we are available for a pass
-            drawer.annotation((0,10.5), "PlayOn: Support - Formation", drawer.Color.cyan, "status")
-            # If I'm the kickoff kicker while the lock is active, explicitly avoid the ball
-            if self.kickoff_kicker_unum == strategyData.robot_model.unum and self.kickoff_lock_active:
-                # Step away from ball if too close
-                to_me = mypos_2d - ball_2d
-                d = np.linalg.norm(to_me)
-                if d < 0.6:
-                    if d < 1e-3:
-                        to_me = np.array([-1.0, 0.0])  # arbitrary safe direction
-                    else:
-                        to_me = to_me / d
-                    safe_point = mypos_2d + to_me * 0.8
-                    desired_ori = strategyData.GetDirectionRelativeToMyPositionAndTarget(ball_2d)
-                    drawer.line(tuple(mypos_2d), tuple(safe_point), 2, drawer.Color.red, "avoid ball")
-                    return self.move(tuple(safe_point), orientation=desired_ori)
-            formation_positions = GenerateBasicFormation()
-            point_preferences = role_assignment(strategyData.teammate_positions, formation_positions)
-            strategyData.my_desired_position = point_preferences[strategyData.player_unum]
-            strategyData.my_desired_orientation = strategyData.GetDirectionRelativeToMyPositionAndTarget(
-                strategyData.my_desired_position)
-            drawer.line(strategyData.mypos, strategyData.my_desired_position, 2, drawer.Color.blue, "target line")
-            return self.move(strategyData.my_desired_position, orientation=strategyData.my_desired_orientation)
+
+        # All other agents: support/formation logic
+        drawer.annotation((0,10.5), "Support - Formation", drawer.Color.cyan, "status")
+        formation_positions = GenerateBasicFormation()
+        point_preferences = role_assignment(strategyData.teammate_positions, formation_positions)
+        strategyData.my_desired_position = point_preferences[strategyData.player_unum]
+        strategyData.my_desired_orientation = strategyData.GetDirectionRelativeToMyPositionAndTarget(
+            strategyData.my_desired_position)
+        drawer.line(strategyData.mypos, strategyData.my_desired_position, 2, drawer.Color.blue, "target line")
+        return self.move(strategyData.my_desired_position, orientation=strategyData.my_desired_orientation)
 
     #--------------------------------------- Fat proxy auxiliary methods
 
